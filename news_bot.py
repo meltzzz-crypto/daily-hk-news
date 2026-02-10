@@ -1,91 +1,97 @@
 import feedparser
 import requests
-import json
 import os
+import time
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-# Configuration
-# MK Real Estate News RSS Feed
+# 설정
 RSS_URL = "https://www.mk.co.kr/rss/50300009/"
-# Fallback Webhook URL (Ideally, this should be an environment variable)
-# But for local testing convenience for the user, we can default it or ask them to set it.
-# In GitHub Actions, we will use secrets.
-WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1470648109892636705/VnxSywBvxtK9sOYHxQtxdImQM5US7ghGtyzk7NFLYKoAgLpdaI0a-Yea-36RO-ihphiS")
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+
+def get_summary_from_url(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # 본문 찾기 (매일경제 사이트 구조 분석)
+        content = ""
+        for selector in ["div.art_txt", "div.news_cnt_detail_wrap", ".txt_area"]:
+            element = soup.select_one(selector)
+            if element:
+                content = element.get_text(separator=" ").strip()
+                break
+        
+        if not content: return None
+
+        # 3문장 요약 (간단한 로직)
+        sentences = content.split('다.')
+        summary = []
+        for s in sentences:
+            s = s.strip()
+            if len(s) > 30 and "기자" not in s: # 너무 짧거나 기자 이름 등 제외
+                summary.append(s + '다.')
+                if len(summary) >= 3: break
+        
+        return summary
+    except:
+        return None
 
 def fetch_rss_news():
-    """Fetches news from the RSS feed."""
-    print(f"Fetching news from {RSS_URL}...")
+    print("뉴스 가져오는 중...")
     feed = feedparser.parse(RSS_URL)
-    
     news_items = []
-    # Get top 5 news items
-    for entry in feed.entries[:5]:
-        title = entry.title
+    
+    # 13개 가져오기
+    for entry in feed.entries[:13]:
         link = entry.link
-        # RSS 'description' often contains HTML, so we clean it up or just use it as summary
-        summary = entry.description
+        print(f"처리 중: {entry.title}")
         
-        # Simple cleanup if summary contains HTML tags (optional, feedparser usually handles entities)
-        soup = BeautifulSoup(summary, "html.parser")
-        clean_summary = soup.get_text()[:200] + "..." if len(soup.get_text()) > 200 else soup.get_text()
+        # 본문 요약 시도
+        summary_points = get_summary_from_url(link)
         
+        if summary_points:
+            desc = "\n".join([f"- {p}" for p in summary_points])
+        else:
+            desc = entry.description[:100] + "..." # 실패하면 기본 요약
+            
         news_items.append({
-            "title": title,
+            "title": entry.title,
             "link": link,
-            "summary": clean_summary,
+            "summary": desc,
             "published": entry.published
         })
+        time.sleep(0.5)
     
     return news_items
 
-def send_to_discord(news_items):
-    """Sends formatted news to Discord."""
-    if not news_items:
-        print("No news items to send.")
-        return
-
-    print(f"Sending {len(news_items)} news items to Discord...")
-
-    # Create the embed structure
-    embeds = []
+def send_to_discord(items):
+    if not items: return
     
-    # Header Embed
-    embeds.append({
-        "title": "📰 매일경제 부동산 주요 뉴스",
-        "description": f"{datetime.now().strftime('%Y-%m-%d %H:%M')} 기준 최신 뉴스입니다.",
-        "color": 0x00ff00  # Green color
-    })
-
-    # News Item Embeds
-    for item in news_items:
-        embeds.append({
-            "title": item['title'],
-            "url": item['link'],
-            "description": item['summary'],
-            "footer": {"text": item['published']}
-        })
-        
-        # Discord has a limit of 10 embeds per message, and also character limits.
-        # Ensure we don't exceed limits.
-        if len(embeds) >= 10:
-            break
+    # 10개씩 나눠서 보내기 (디스코드 제한)
+    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
+    
+    for i, chunk in enumerate(chunks):
+        embeds = []
+        if i == 0:
+            embeds.append({
+                "title": "📰 매일경제 부동산 주요 뉴스 (13선)",
+                "description": f"{datetime.now().strftime('%Y-%m-%d')} 아침 뉴스 요약입니다.",
+                "color": 0x00ff00
+            })
             
-    payload = {
-        "username": "MK부동산뉴스봇",
-        "embeds": embeds
-    }
-
-    try:
-        response = requests.post(WEBHOOK_URL, json=payload)
-        response.raise_for_status()
-        print("Successfully sent to Discord.")
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending to Discord: {e}")
+        for item in chunk:
+            embeds.append({
+                "title": item['title'],
+                "url": item['link'],
+                "description": item['summary'],
+                "footer": {"text": "MK News"}
+            })
+            
+        requests.post(WEBHOOK_URL, json={"username": "MK부동산뉴스봇", "embeds": embeds})
+        time.sleep(1)
 
 if __name__ == "__main__":
-    if "123456789" in WEBHOOK_URL:
-        print("Error: Please set a valid WEBHOOK_URL in the script or environment variables.")
-    else:
-        news = fetch_rss_news()
-        send_to_discord(news)
+    news = fetch_rss_news()
+    send_to_discord(news)
