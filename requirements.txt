@@ -1,3 +1,5 @@
 requests
 feedparser
 beautifulsoup4
+selenium
+webdriver-manager
